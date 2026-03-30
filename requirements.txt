@@ -1,9 +1,11 @@
-# Web量化交易平台依赖
+# 高级量化交易平台依赖
 streamlit>=1.30.0
 pandas>=1.3.0
 numpy>=1.21.0
 baostock==0.8.9
 plotly>=5.0.0
+scikit-learn>=1.0.0
+scipy>=1.7.0
 
 # 注意：所有包均为免费开源
 # 无商业API依赖
