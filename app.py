@@ -9,6 +9,7 @@ import baostock as bs
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 import plotly.express as px
+from strategies import QuantStrategies
 
 # 页面配置
 st.set_page_config(
@@ -50,6 +51,13 @@ st.markdown("""
         padding: 1rem;
         margin: 1rem 0;
     }
+    .strategy-card {
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        background-color: #f8f9fa;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -60,6 +68,7 @@ class WebSimulator:
         self.lg = bs.login()
         if self.lg.error_code != '0':
             st.error(f"数据源连接失败: {self.lg.error_msg}")
+        self.strategies = QuantStrategies()
     
     def get_trading_days(self, start_date: str, end_date: str) -> list:
         """获取交易日历"""
@@ -93,9 +102,9 @@ class WebSimulator:
         df['volume'] = df['volume'].astype(float)
         return df
     
-    def run_momentum_backtest(self, lookback_days: int, holding_period: int, 
+    def run_strategy_backtest(self, strategy_func, strategy_params: dict,
                             start_date: str, end_date: str, initial_capital: float = 100000):
-        """运行动量策略回测"""
+        """运行指定策略的回测"""
         
         # 获取交易日历
         trading_days = self.get_trading_days(start_date, end_date)
@@ -108,35 +117,24 @@ class WebSimulator:
         portfolio_values = []
         trade_history = []
         
-        # 简化的动量策略（为演示目的）
-        # 实际应用中会更复杂
+        # 策略参数
+        rebalance_frequency = strategy_params.get('rebalance_frequency', 'monthly')  # monthly, weekly, daily
         
         for i, trade_date in enumerate(trading_days):
-            # 每月重新平衡
-            if i == 0 or trade_date[:7] != trading_days[i-1][:7]:
-                
-                # 选择几只代表性股票进行演示
-                demo_stocks = ["sh.600036", "sh.601318", "sz.000858", "sz.002415"]
-                selected_stocks = []
-                
-                # 计算动量分数
-                momentum_scores = []
-                for stock in demo_stocks:
-                    try:
-                        hist_start = (datetime.strptime(trade_date, '%Y-%m-%d') - 
-                                    timedelta(days=lookback_days*2)).strftime('%Y-%m-%d')
-                        hist_data = self.get_stock_data(stock, hist_start, trade_date)
-                        if len(hist_data) >= lookback_days:
-                            prices = hist_data['close'].values
-                            momentum = (prices[-1] - prices[-lookback_days]) / prices[-lookback_days]
-                            momentum_scores.append((stock, momentum))
-                    except:
-                        continue
-                
-                # 选择动量最高的股票
-                momentum_scores.sort(key=lambda x: x[1], reverse=True)
-                selected_stocks = [score[0] for score in momentum_scores[:2]]
-                
+            # 决定是否重新平衡
+            should_rebalance = False
+            
+            if rebalance_frequency == 'daily':
+                should_rebalance = True
+            elif rebalance_frequency == 'weekly':
+                if i == 0 or (datetime.strptime(trade_date, '%Y-%m-%d').weekday() == 0 and 
+                             datetime.strptime(trading_days[i-1], '%Y-%m-%d').weekday() != 0):
+                    should_rebalance = True
+            elif rebalance_frequency == 'monthly':
+                if i == 0 or trade_date[:7] != trading_days[i-1][:7]:
+                    should_rebalance = True
+            
+            if should_rebalance:
                 # 平仓现有持仓
                 for stock_code in list(positions.keys()):
                     price_info = self.get_stock_data(stock_code, trade_date, trade_date)
@@ -156,6 +154,12 @@ class WebSimulator:
                         })
                 
                 positions = {}
+                
+                # 选择新股票
+                try:
+                    selected_stocks = strategy_func(trading_days[:i+1], **strategy_params)
+                except Exception as e:
+                    selected_stocks = []
                 
                 # 买入新选股票
                 if selected_stocks:
@@ -234,8 +238,28 @@ def main():
         - ❌ 不提供实盘交易功能
         """)
     
+    # 策略介绍
+    with st.expander("🎯 10大经典量化策略介绍", expanded=False):
+        strategies_obj = QuantStrategies()
+        descriptions = strategies_obj.get_strategy_descriptions()
+        
+        cols = st.columns(2)
+        for i, (name, desc) in enumerate(descriptions.items()):
+            with cols[i % 2]:
+                st.markdown(f"""
+                <div class="strategy-card">
+                <h4>{name}</h4>
+                <p>{desc}</p>
+                </div>
+                """, unsafe_allow_html=True)
+    
     # 参数设置侧边栏
     st.sidebar.header("📊 回测参数设置")
+    
+    # 策略选择
+    strategies_obj = QuantStrategies()
+    all_strategies = list(strategies_obj.get_all_strategies().keys())
+    selected_strategy = st.sidebar.selectbox("选择策略", all_strategies, index=0)
     
     # 回测期间
     end_date = datetime.now().strftime('%Y-%m-%d')
@@ -245,17 +269,45 @@ def main():
                                      max_value=datetime.now() - timedelta(days=1))
     start_date_str = start_date.strftime('%Y-%m-%d')
     
-    # 策略参数
-    lookback_days = st.sidebar.slider("动量计算周期（天）", 5, 60, 20)
-    holding_period = st.sidebar.slider("持仓周期（天）", 1, 30, 5)
+    # 策略特定参数
+    st.sidebar.subheader("⚙️ 策略参数")
+    
+    strategy_params = {}
+    
+    if selected_strategy == "动量策略":
+        strategy_params['lookback_days'] = st.sidebar.slider("动量计算周期（天）", 5, 60, 20)
+        strategy_params['top_n'] = st.sidebar.slider("选择股票数量", 1, 5, 3)
+    elif selected_strategy == "均值回归":
+        strategy_params['window'] = st.sidebar.slider("回看窗口（天）", 10, 60, 20)
+        strategy_params['bottom_n'] = st.sidebar.slider("选择股票数量", 1, 5, 3)
+    elif selected_strategy == "放量突破":
+        strategy_params['volume_multiplier'] = st.sidebar.slider("成交量倍数", 1.0, 5.0, 2.0)
+    elif selected_strategy == "双重推力":
+        strategy_params['k1'] = st.sidebar.slider("上轨系数", 0.1, 1.0, 0.7)
+        strategy_params['k2'] = st.sidebar.slider("下轨系数", 0.1, 1.0, 0.7)
+    elif selected_strategy == "网格交易":
+        strategy_params['grid_levels'] = st.sidebar.slider("网格层数", 3, 10, 5)
+    elif selected_strategy == "多因子组合":
+        pass  # 使用默认参数
+    else:
+        pass  # 其他策略使用默认参数
+    
+    # 通用参数
+    st.sidebar.subheader("🔧 通用参数")
+    rebalance_options = {"每日": "daily", "每周": "weekly", "每月": "monthly"}
+    rebalance_choice = st.sidebar.selectbox("调仓频率", list(rebalance_options.keys()), index=2)
+    strategy_params['rebalance_frequency'] = rebalance_options[rebalance_choice]
+    
     initial_capital = st.sidebar.number_input("初始资金（元）", 10000, 1000000, 100000, step=10000)
     
     # 运行按钮
     if st.sidebar.button("🚀 开始回测", use_container_width=True):
         with st.spinner("正在运行回测..."):
             simulator = WebSimulator()
-            results, error = simulator.run_momentum_backtest(
-                lookback_days, holding_period, 
+            strategy_func = strategies_obj.get_all_strategies()[selected_strategy]
+            
+            results, error = simulator.run_strategy_backtest(
+                strategy_func, strategy_params,
                 start_date_str, end_date, initial_capital
             )
             
@@ -281,6 +333,10 @@ def main():
                 with col4:
                     target_achieved = "✅ 达成" if results['roi'] >= 1.3 else "❌ 未达成"
                     st.metric("目标状态", target_achieved)
+                
+                # 策略信息
+                st.subheader(f"📊 当前策略: {selected_strategy}")
+                st.caption(strategies_obj.get_strategy_descriptions()[selected_strategy])
                 
                 # 投资组合价值图表
                 if results['portfolio_values']:
@@ -324,14 +380,8 @@ def main():
                     df_trades['date'] = pd.to_datetime(df_trades['date'])
                     df_trades = df_trades.sort_values('date', ascending=False)
                     
-                    # 添加股票名称映射（简化）
-                    stock_names = {
-                        'sh.600036': '招商银行',
-                        'sh.601318': '中国平安', 
-                        'sz.000858': '五粮液',
-                        'sz.002415': '海康威视'
-                    }
-                    df_trades['stock_name'] = df_trades['stock'].map(stock_names)
+                    # 添加股票名称映射
+                    df_trades['stock_name'] = df_trades['stock'].map(strategies_obj.stock_names)
                     
                     st.dataframe(
                         df_trades[['date', 'action', 'stock_name', 'shares', 'price', 'amount']],
@@ -341,15 +391,16 @@ def main():
     
     else:
         # 欢迎界面
-        st.info("👈 请在左侧设置参数并点击'开始回测'")
+        st.info("👈 请在左侧选择策略、设置参数并点击'开始回测'")
         
-        st.markdown("""
+        st.markdown(f"""
         ### 平台特色
         
-        **🎯 目标导向**
-        - 自动优化策略参数
-        - ROI目标 ≥ 1.3（30%总收益）
-        - 实时显示达成状态
+        **🎯 10大经典策略**
+        - 动量策略、均值回归、MACD金叉
+        - RSI背离、放量突破、双重推力  
+        - 网格交易、多因子组合、布林带收口
+        - 市场择时
         
         **🛡️ 合规安全**  
         - 严格遵循A股交易规则
@@ -362,7 +413,7 @@ def main():
         - 性能指标面板
         
         **🚀 立即开始**
-        调整参数，测试不同策略组合！
+        选择策略，调整参数，测试不同组合！
         """)
 
 if __name__ == "__main__":
